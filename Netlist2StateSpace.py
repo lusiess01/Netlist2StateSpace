@@ -63,4 +63,3 @@ def process_netlist(elements):
 # Example call
 netlist = read_netlist("buck.csv")  # CSV filename
 process_netlist(netlist)
-# sad
