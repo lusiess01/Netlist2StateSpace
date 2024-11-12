@@ -17,19 +17,23 @@ def read_netlist(filename):
 
 # Function to process the netlist and generate the state-space model
 def process_netlist(elements):
-    # Example processing to recognize switch states and components
+    global switch_state
+    # Loop through each element in the netlist and assign its value or type
     for element in elements:
         element_type = element['Element']
+        value = element['Value']
+        
+        # Assign parameters based on element type
         if element_type == 'E':
-            Vi = sp.symbols(element['Value'])
+            Vi = sp.symbols(value)
         elif element_type == 'L':
-            L = sp.symbols(element['Value'])
+            L = sp.symbols(value)
         elif element_type == 'R':
-            R = sp.symbols(element['Value'])
+            R = sp.symbols(value)
         elif element_type == 'C':
-            C = sp.symbols(element['Value'])
-        elif element_type in ['D', 'S'] and element['Type'] == 'Ideal switch':
-            switch_state = 1  # Assume the switch is closed
+            C = sp.symbols(value)
+        elif element_type in ['D', 'S']:  # Assume these represent ideal switches
+            switch_state = 1  # Set switch state to closed (1)
 
     # Define state differential equations
     di_L_dt = sp.Piecewise(
@@ -61,5 +65,5 @@ def process_netlist(elements):
     sp.pprint(D_matrix)
 
 # Example call
-netlist = read_netlist("buck.csv")  # CSV filename
+netlist = read_netlist('test.csv')  # CSV filename
 process_netlist(netlist)
