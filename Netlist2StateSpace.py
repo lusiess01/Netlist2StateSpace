@@ -1,119 +1,129 @@
 import csv
 import sympy as sp
 
+
 class MNACircuit:
-    def __init__(self, filename):
+    def __init__(self, netlist_file):
         self.netlist = []
-        self.nodes = set()
+        self.node_map = {}
+        self.num_nodes = 0
         self.voltage_sources = []
-        
-        # Read the CSV file and parse components
-        with open(filename, 'r') as file:
-            reader = csv.reader(file, delimiter=',')  # Using comma delimiter
+        self.read_netlist(netlist_file)
+        self.build_matrices()
+
+    def read_netlist(self, netlist_file):
+        with open(netlist_file, 'r') as file:
+            reader = csv.reader(file)
             for row in reader:
-                # Skip rows that don't have exactly 4 elements or contain empty values
-                if len(row) != 4 or any(val.strip() == '' for val in row):
-                    continue
-                
+                if len(row) < 4:
+                    continue  # Skip rows that don't have enough values
                 element, node_i, node_j, value = row
-                
-                # Check if the value is an empty string (ideal switch)
-                if value == '':  # Ideal switch
-                    value = sp.symbols('Switch')  # Symbolic representation for the switch
-                    # Alternatively, you could treat 'Switch' as zero or infinite resistance.
-                    # For example, if you want to model a closed switch (perfect conductor):
-                    # value = 0
-                elif value.isalpha():  # Check if the value is a variable (alphabetic)
-                    value = sp.symbols(value)  # Create a symbolic variable using sympy
+                # Process the value as either a number or a symbol (if variable)
+                if value == '':
+                    value = None  # Empty value treated as ideal switch
                 else:
                     try:
                         value = float(value)  # Try to convert to float
                     except ValueError:
-                        value = sp.symbols(value)  # If it's not a valid number, treat as a symbol
-                
-                self.netlist.append((element, int(node_i), int(node_j), value))
-                self.nodes.update([int(node_i), int(node_j)])
-        
-        self.nodes.discard(0)  # remove ground node
-        self.num_nodes = len(self.nodes)
-        self.node_map = {node: idx + 1 for idx, node in enumerate(self.nodes)}  # map nodes to indices
-        self.node_map[0] = 0  # ground node at index 0
-        self.build_matrices()
+                        value = sp.symbols(value)  # Treat as symbol if it's not a number
 
+                # Map nodes to indices
+                if node_i not in self.node_map:
+                    self.node_map[node_i] = self.num_nodes
+                    self.num_nodes += 1
+                if node_j not in self.node_map:
+                    self.node_map[node_j] = self.num_nodes
+                    self.num_nodes += 1
+                
+                # Add to the netlist
+                self.netlist.append((element, node_i, node_j, value))
+    
     def build_matrices(self):
-        # Use sympy to create symbolic matrices
-        self.G = sp.zeros(self.num_nodes, self.num_nodes)
-        self.B = sp.zeros(self.num_nodes + len(self.voltage_sources), 1)
-        self.v_source_count = 0
+        # Initialize symbolic matrices
+        self.G = sp.zeros(self.num_nodes, self.num_nodes)  # Conductance matrix
+        self.B = sp.zeros(self.num_nodes + len(self.voltage_sources), 1)  # Voltage sources matrix
 
         # Count voltage sources to expand MNA matrix for them
+        self.v_source_count = 0
         for element, _, _, _ in self.netlist:
-            if element.startswith('V'):
+            if element.startswith('V') or element.startswith('E'):
                 self.v_source_count += 1
 
-        # Full MNA matrix
+        # Full MNA matrix: It includes both nodes and voltage sources
         size = self.num_nodes + self.v_source_count
         self.MNA = sp.zeros(size, size)
 
         # Populate G and B matrices
         for element, node_i, node_j, value in self.netlist:
-            node_i = self.node_map[node_i]
-            node_j = self.node_map[node_j]
+            node_i = self.node_map.get(node_i, None)
+            node_j = self.node_map.get(node_j, None)
+            
+            if node_i is None or node_j is None:
+                print(f"Warning: Skipping invalid node pair ({node_i}, {node_j}) for element {element}")
+                continue
             
             if element.startswith('R'):
                 self.add_resistor(node_i, node_j, value)
             elif element.startswith('I'):
                 self.add_current_source(node_i, node_j, value)
-            elif element.startswith('V'):
+            elif element.startswith('V') or element.startswith('E'):
                 self.add_voltage_source(node_i, node_j, value)
+            elif element == 'S':  # Switch handling
+                self.add_switch(node_i, node_j, value)
+            elif element == 'L':  # Inductor or special handling
+                self.add_inductor(node_i, node_j, value)
+            elif element == 'C':  # Capacitor or special handling
+                self.add_capacitor(node_i, node_j, value)
+            elif element == 'D':  # Diode or special handling
+                self.add_diode(node_i, node_j, value)
 
         # Copy G to MNA and add voltage sources
         self.MNA[:self.num_nodes, :self.num_nodes] = self.G
 
-    def add_resistor(self, node_i, node_j, resistance):
-        if resistance == 0:  # Closed switch (ideal conductor)
-            conductance = sp.oo  # Infinite conductance (perfect conductor)
-        elif resistance == sp.oo:  # Open switch (ideal insulator)
-            conductance = 0  # No conductance (perfect insulator)
-        elif isinstance(resistance, sp.Basic):  # If the resistance is symbolic
-            conductance = 1 / resistance
+    def add_resistor(self, node_i, node_j, value):
+        conductance = 1 / value if value is not None else 0
+        self.G[node_i, node_i] += conductance
+        self.G[node_j, node_j] += conductance
+        self.G[node_i, node_j] -= conductance
+        self.G[node_j, node_i] -= conductance
+
+    def add_current_source(self, node_i, node_j, value):
+        if value is None:
+            return  # Ideal switch, no effect on matrix
+        self.B[node_i, 0] += value
+        self.B[node_j, 0] -= value
+
+    def add_voltage_source(self, node_i, node_j, value):
+        # For now, assuming the voltage source equation is added
+        # This needs to be implemented if needed
+        pass
+
+    def add_switch(self, node_i, node_j, value):
+        if value is None:
+            # Ideal switch: We assume it has no effect when open
+            return
         else:
-            conductance = 1 / resistance
+            # You can add logic here for non-ideal switches if necessary
+            pass
 
-        if node_i > 0:
-            self.G[node_i - 1, node_i - 1] += conductance
-        if node_j > 0:
-            self.G[node_j - 1, node_j - 1] += conductance
-        if node_i > 0 and node_j > 0:
-            self.G[node_i - 1, node_j - 1] -= conductance
-            self.G[node_j - 1, node_i - 1] -= conductance
+    def add_inductor(self, node_i, node_j, value):
+        # If we consider an inductor as a symbolic value or special matrix logic
+        pass
 
-    def add_current_source(self, node_i, node_j, current):
-        if isinstance(current, sp.Basic):  # If the current is symbolic
-            pass  # You can add symbolic handling here if needed
-        if node_i > 0:
-            self.B[node_i - 1] -= current
-        if node_j > 0:
-            self.B[node_j - 1] += current
+    def add_capacitor(self, node_i, node_j, value):
+        # If we consider a capacitor as a symbolic value or special matrix logic
+        pass
 
-    def add_voltage_source(self, node_i, node_j, voltage):
-        v_idx = self.num_nodes + len(self.voltage_sources)
-        self.voltage_sources.append((node_i, node_j, voltage))
+    def add_diode(self, node_i, node_j, value):
+        # If we consider a diode as a symbolic value or special matrix logic
+        pass
 
-        if node_i > 0:
-            self.MNA[node_i - 1, v_idx] = 1
-            self.MNA[v_idx, node_i - 1] = 1
-        if node_j > 0:
-            self.MNA[node_j - 1, v_idx] = -1
-            self.MNA[v_idx, node_j - 1] = -1
 
-        self.B[v_idx] = voltage
-
-    def solve(self):
-        # Solve the symbolic MNA matrix
-        solution = sp.linsolve((self.MNA, self.B))
-        print("Solution (Node Voltages and Source Currents):\n", solution)
-
-# Example usage
-circuit = MNACircuit('test.csv')
-circuit.solve()
+if __name__ == "__main__":
+    # Path to the CSV file
+    netlist_file = 'test.csv'
+    circuit = MNACircuit(netlist_file)
+    
+    # Print the MNA matrix
+    print("MNA Matrix:")
+    sp.pprint(circuit.MNA)
