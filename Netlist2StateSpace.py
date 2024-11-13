@@ -1,129 +1,133 @@
-import csv
-import sympy as sp
+import sympy as sym
+from sympy import pprint
 
+# Load the SPICE netlist from a file
+def loadNetlist(filePath):
+    with open(filePath, 'r') as f:
+        return f.read().splitlines()
 
-class MNACircuit:
-    def __init__(self, netlist_file):
-        self.netlist = []
-        self.node_map = {}
-        self.num_nodes = 0
-        self.voltage_sources = []
-        self.read_netlist(netlist_file)
-        self.build_matrices()
+# Generate a new unique symbol with a prefix for circuit elements
+def createSymbol(symbolList, prefix):
+    count = sum(1 for s in symbolList if str(s).startswith(prefix))
+    newSymbol = sym.Symbol(prefix + str(count + 1))
+    symbolList.append(newSymbol)
+    return newSymbol
 
-    def read_netlist(self, netlist_file):
-        with open(netlist_file, 'r') as file:
-            reader = csv.reader(file)
-            for row in reader:
-                if len(row) < 4:
-                    continue  # Skip rows that don't have enough values
-                element, node_i, node_j, value = row
-                # Process the value as either a number or a symbol (if variable)
-                if value == '':
-                    value = None  # Empty value treated as ideal switch
-                else:
-                    try:
-                        value = float(value)  # Try to convert to float
-                    except ValueError:
-                        value = sp.symbols(value)  # Treat as symbol if it's not a number
+# Parse the netlist to count nodes, currents, and voltage sources
+def parseNetlist(netlist):
+    nodes = set()  # Set to store all unique nodes
+    currentSymbols = []  # List to store symbols for currents and inductors
+    currentCount = 0
+    voltageSourceCount = 0
 
-                # Map nodes to indices
-                if node_i not in self.node_map:
-                    self.node_map[node_i] = self.num_nodes
-                    self.num_nodes += 1
-                if node_j not in self.node_map:
-                    self.node_map[node_j] = self.num_nodes
-                    self.num_nodes += 1
-                
-                # Add to the netlist
-                self.netlist.append((element, node_i, node_j, value))
-    
-    def build_matrices(self):
-        # Initialize symbolic matrices
-        self.G = sp.zeros(self.num_nodes, self.num_nodes)  # Conductance matrix
-        self.B = sp.zeros(self.num_nodes + len(self.voltage_sources), 1)  # Voltage sources matrix
+    for line in netlist:
+        parts = line.split()
+        nodes.update(parts[1:3])  # Add nodes from each line
+        element = parts[0]
+        if element in ('L', 'D', 'S', 'E'):  # Elements that require additional equations
+            currentSymbols.append(element)
+            currentCount += 1
+            if element == 'E':  # Count voltage sources separately
+                voltageSourceCount += 1
 
-        # Count voltage sources to expand MNA matrix for them
-        self.v_source_count = 0
-        for element, _, _, _ in self.netlist:
-            if element.startswith('V') or element.startswith('E'):
-                self.v_source_count += 1
+    if '0' in nodes:  # Remove ground node from node count
+        nodes.remove('0')
 
-        # Full MNA matrix: It includes both nodes and voltage sources
-        size = self.num_nodes + self.v_source_count
-        self.MNA = sp.zeros(size, size)
+    return len(nodes), currentCount, voltageSourceCount, currentSymbols
 
-        # Populate G and B matrices
-        for element, node_i, node_j, value in self.netlist:
-            node_i = self.node_map.get(node_i, None)
-            node_j = self.node_map.get(node_j, None)
-            
-            if node_i is None or node_j is None:
-                print(f"Warning: Skipping invalid node pair ({node_i}, {node_j}) for element {element}")
-                continue
-            
-            if element.startswith('R'):
-                self.add_resistor(node_i, node_j, value)
-            elif element.startswith('I'):
-                self.add_current_source(node_i, node_j, value)
-            elif element.startswith('V') or element.startswith('E'):
-                self.add_voltage_source(node_i, node_j, value)
-            elif element == 'S':  # Switch handling
-                self.add_switch(node_i, node_j, value)
-            elif element == 'L':  # Inductor or special handling
-                self.add_inductor(node_i, node_j, value)
-            elif element == 'C':  # Capacitor or special handling
-                self.add_capacitor(node_i, node_j, value)
-            elif element == 'D':  # Diode or special handling
-                self.add_diode(node_i, node_j, value)
+# Initialize variables for node voltages and currents
+def initializeVariables(nodeCount, currentSymbols):
+    variables = sym.zeros(nodeCount + len(currentSymbols), 1)
+    for i in range(nodeCount):
+        variables[i] = sym.Symbol('V' + str(i))  # Node voltages
+    for i, current in enumerate(currentSymbols):
+        variables[nodeCount + i] = sym.Symbol('I' + current)  # Current symbols
+    variableDerivatives = variables.diff("t")  # Time derivatives of variables
+    return variables, variableDerivatives
 
-        # Copy G to MNA and add voltage sources
-        self.MNA[:self.num_nodes, :self.num_nodes] = self.G
+# Add stamp for a resistor to the conductance matrix
+def resistorStamp(nodeA, nodeB, conductanceMatrix, symbol):
+    conductanceMatrix[nodeA, nodeA] += symbol
+    conductanceMatrix[nodeA, nodeB] -= symbol
+    conductanceMatrix[nodeB, nodeA] -= symbol
+    conductanceMatrix[nodeB, nodeB] += symbol
 
-    def add_resistor(self, node_i, node_j, value):
-        conductance = 1 / value if value is not None else 0
-        self.G[node_i, node_i] += conductance
-        self.G[node_j, node_j] += conductance
-        self.G[node_i, node_j] -= conductance
-        self.G[node_j, node_i] -= conductance
+# Add stamp for a capacitor to the capacitance matrix
+def capacitorStamp(nodeA, nodeB, capacitanceMatrix, symbol):
+    capacitanceMatrix[nodeA, nodeA] += symbol
+    capacitanceMatrix[nodeA, nodeB] -= symbol
+    capacitanceMatrix[nodeB, nodeA] -= symbol
+    capacitanceMatrix[nodeB, nodeB] += symbol
 
-    def add_current_source(self, node_i, node_j, value):
-        if value is None:
-            return  # Ideal switch, no effect on matrix
-        self.B[node_i, 0] += value
-        self.B[node_j, 0] -= value
+# Add stamp for an inductor to the conductance and capacitance matrices
+def inductorStamp(nodeA, nodeB, conductanceMatrix, capacitanceMatrix, symbol, index):
+    conductanceMatrix[nodeA, index] += 1
+    conductanceMatrix[nodeB, index] -= 1
+    conductanceMatrix[index, nodeA] += 1
+    conductanceMatrix[index, nodeB] -= 1
+    capacitanceMatrix[index, index] -= symbol
 
-    def add_voltage_source(self, node_i, node_j, value):
-        # For now, assuming the voltage source equation is added
-        # This needs to be implemented if needed
-        pass
+# Add stamp for a voltage source to the conductance and RHV matrices
+def voltageSourceStamp(nodeA, nodeB, conductanceMatrix, rhvMatrix, symbol, index):
+    conductanceMatrix[nodeA, index] += 1
+    conductanceMatrix[nodeB, index] -= 1
+    conductanceMatrix[index, nodeA] += 1
+    conductanceMatrix[index, nodeB] -= 1
+    rhvMatrix[index] += symbol
 
-    def add_switch(self, node_i, node_j, value):
-        if value is None:
-            # Ideal switch: We assume it has no effect when open
-            return
+# Build the MNA matrices based on the netlist
+def buildMnaMatrices(netlist, nodeCount, currentSymbols):
+    symbolList = []
+    dimension = nodeCount + len(currentSymbols)
+    conductanceMatrix = sym.zeros(dimension, dimension)
+    capacitanceMatrix = sym.zeros(dimension, dimension)
+    rhvMatrix = sym.zeros(dimension, 1)
+
+    for line in netlist:
+        parts = line.split()
+        nodeA = int(parts[1]) - 1
+        nodeB = int(parts[2]) - 1
+        element = parts[0]
+        symbol = None
+        index = None
+
+        if element == 'R':
+            symbol = createSymbol(symbolList, 'G')
+            resistorStamp(nodeA, nodeB, conductanceMatrix, symbol)
+        elif element == 'L':
+            symbol = createSymbol(symbolList, 'L')
+            index = nodeCount + currentSymbols.index(element)
+            inductorStamp(nodeA, nodeB, conductanceMatrix, capacitanceMatrix, symbol, index)
+        elif element in ('S', 'D'):
+            symbol = createSymbol(symbolList, 'p')
+            index = nodeCount + currentSymbols.index(element)
+            inductorStamp(nodeA, nodeB, conductanceMatrix, capacitanceMatrix, symbol, index)
+        elif element == 'E':
+            symbol = createSymbol(symbolList, 'E')
+            index = nodeCount + currentSymbols.index(element)
+            voltageSourceStamp(nodeA, nodeB, conductanceMatrix, rhvMatrix, symbol, index)
+        elif element == 'C':
+            symbol = createSymbol(symbolList, 'C')
+            capacitorStamp(nodeA, nodeB, capacitanceMatrix, symbol)
         else:
-            # You can add logic here for non-ideal switches if necessary
-            pass
+            raise ValueError(f"Unknown element {element}")
 
-    def add_inductor(self, node_i, node_j, value):
-        # If we consider an inductor as a symbolic value or special matrix logic
-        pass
-
-    def add_capacitor(self, node_i, node_j, value):
-        # If we consider a capacitor as a symbolic value or special matrix logic
-        pass
-
-    def add_diode(self, node_i, node_j, value):
-        # If we consider a diode as a symbolic value or special matrix logic
-        pass
+    return conductanceMatrix, capacitanceMatrix, rhvMatrix
 
 
-if __name__ == "__main__":
-    # Path to the CSV file
-    netlist_file = 'test.csv'
-    circuit = MNACircuit(netlist_file)
-    
-    # Print the MNA matrix
-    print("MNA Matrix:")
-    sp.pprint(circuit.MNA)
+def displayResults(variables, variableDerivatives, conductanceMatrix, capacitanceMatrix, rhvMatrix):
+    print("MNA Equation:")
+    pprint(sym.Eq(conductanceMatrix * variables + capacitanceMatrix * variableDerivatives, rhvMatrix))
+
+
+def main():
+    netlistFilePath = "buck.txt"
+    netlist = loadNetlist(netlistFilePath)
+    nodeCount, currentCount, voltageSourceCount, currentSymbols = parseNetlist(netlist)
+    variables, variableDerivatives = initializeVariables(nodeCount, currentSymbols)
+    conductanceMatrix, capacitanceMatrix, rhvMatrix = buildMnaMatrices(netlist, nodeCount, currentSymbols)
+    displayResults(variables, variableDerivatives, conductanceMatrix, capacitanceMatrix, rhvMatrix)
+
+
+if __name__ == '__main__':
+    main()

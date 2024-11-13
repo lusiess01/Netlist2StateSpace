@@ -1,0 +1,6 @@
+E 1 0 Vi
+D 0 2 (Ideal switch)
+S 2 1 (Ideal switch)
+L 3 2 L
+R 3 0 R
+C 3 0 C 
