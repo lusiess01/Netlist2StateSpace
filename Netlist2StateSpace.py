@@ -1,3 +1,4 @@
+import sys
 import sympy as sym
 from sympy import pprint
 
@@ -120,14 +121,16 @@ def displayResults(variables, variableDerivatives, conductanceMatrix, capacitanc
     pprint(sym.Eq(conductanceMatrix * variables + capacitanceMatrix * variableDerivatives, rhvMatrix))
 
 
-def main():
-    netlistFilePath = "buck.txt"
+def main(netlistFilePath):
     netlist = loadNetlist(netlistFilePath)
     nodeCount, currentCount, voltageSourceCount, currentSymbols = parseNetlist(netlist)
     variables, variableDerivatives = initializeVariables(nodeCount, currentSymbols)
     conductanceMatrix, capacitanceMatrix, rhvMatrix = buildMnaMatrices(netlist, nodeCount, currentSymbols)
     displayResults(variables, variableDerivatives, conductanceMatrix, capacitanceMatrix, rhvMatrix)
 
-
-if __name__ == '__main__':
-    main()
+if __name__ == "__main__":
+    if len(sys.argv) > 1:
+        netlistFilePath = sys.argv[1]
+    else:
+        netlistFilePath = "buck.txt"  # Standardwert, falls kein Pfad übergeben wird
+    main(netlistFilePath)
